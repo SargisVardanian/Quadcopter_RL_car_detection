@@ -78,10 +78,9 @@ except:
     loss_ = deque(maxlen=1000)
     loss_crit = deque(maxlen=1000)
     sum_rewards = deque(maxlen=1000)
-
     recent_hid.append(torch.zeros(1, 1, 256))
 
-input_dim = 17
+input_dim = 21
 action_dim = 7
 epsilon = 0.1
 
@@ -184,9 +183,10 @@ def generate_action_number(states, state_dict, b_vec, hid=None):
     criterion = torch.nn.MSELoss(reduction='none')  # Используем reduction='none' для получения вектора потерь
 
     losses = criterion(probs1, target_vector * 3)
-    # optimizer = torch.optim.AdamW(actor.parameters(), lr=0.00005)
-    losses = losses.mean(dim=1)
+    # optimizer = torch.optim.AdamW(actor.parameters(), lr=0.0001)
+    losses = losses.mean()
     # optimizer.zero_grad()
+    # losses.backward(retain_graph=True)
     # for loss in losses:
     #     loss.backward(retain_graph=True)
     # optimizer.step()
@@ -194,7 +194,7 @@ def generate_action_number(states, state_dict, b_vec, hid=None):
     actions = m.sample()
     #
     # actions = probs.argmax(1)
-    return actions, probs, m.log_prob(actions), m.entropy(), hid, losses.mean()
+    return actions, probs, m.log_prob(actions), m.entropy(), hid, losses, actions_targ
 
 def select_action_ddqn(states, b_vec, policy_net, rewards, device='cpu'):
     batch_size = states.size(0)  # Размер батча
@@ -214,19 +214,25 @@ def process_file(file_path):
         new_states = np.array([list(map(float, line.split(','))) for line in matrix_lines])
         return new_states.transpose()
 
-def bb_vectors(state, original_size=256, new_size=128):
+def bb_vectors(state, original_size=256, new_size=256):
     state_without_bb = torch.cat((state[:, :10], state[:, 15:21]), dim=1)  # Concatenate to create a tuple
+
+    bb = state[:, 10:14]
+    em_bb = bb/64-2
+    state_without_bb = torch.cat((state_without_bb, em_bb), dim=1)
+
     index = torch.linspace(-2, 2, 40)  # Create an index for values in range -2 to 2 with 40 steps
 
     # Adjust the first column (assuming it's in range 0 to 32) to be within 0 to 40
     state_without_bb[:, 0] = torch.clamp((state_without_bb[:, 0] / 0.8).round(), 0, 40).int()
 
-    # Adjust other columns (assuming they're in range -2 to 2) to be within 0 to 40
-    # Mapping -2 to 0, 0 to 20, and 2 to 40
-    state_without_bb[:, 1:] = torch.clamp(((state_without_bb[:, 1:] - (-2)) / (2 - (-2)) * 40).round(), 0, 40).int()
 
     # Processing bounding boxes
-    bb = state[:, 10:14]
+
+    # Adjust other columns (assuming they're in range -2 to 2) to be within 0 to 40
+    state_without_bb[:, 1:] = torch.clamp(((state_without_bb[:, 1:] - (-2)) / (2 - (-2)) * 40).round(), 0, 40).int()
+    # Mapping -2 to 0, 0 to 20, and 2 to 40
+
     bounding_boxes = bb.round().int()
     invalid_mask = torch.any(bounding_boxes == -1, dim=1)
     scale_factor = new_size / original_size
@@ -244,7 +250,7 @@ def bb_vectors(state, original_size=256, new_size=128):
     return state_without_bb, bb_vector
 
 
-def send_data(new_states, keys, recent_actions, b_boxes, recent_rewards, recent_hid, alpha_bb=0.25):
+def send_data(new_states, keys, recent_actions, b_boxes, recent_rewards, recent_hid, alpha_bb=0.5):
     state = torch.from_numpy(new_states).float()
     state_dict = dict(zip(keys, new_states))
     c = ['DisTerr', 'Roll', 'Pitch', 'Yaw', 'RotX', 'RotY', 'RotZ', 'angularVelocityX',  'angularVelocityY', 'angularVelocityZ',  'Bounding_box_X', 'Bounding_box_Y', 'Bounding_box_W', 'Bounding_box_H', 'time', 'Acceleration_x', 'Acceleration_y', 'Acceleration_z', 'AngularAcceleratio_x', 'AngularAcceleratio_y', 'AngularAcceleratio_z']
@@ -275,30 +281,27 @@ def send_data(new_states, keys, recent_actions, b_boxes, recent_rewards, recent_
 
     recent_states.append(state_only)
 
+    b_boxes.append(bb_vec * (alpha_bb + 1) - torch.abs(alpha_bb * b_boxes[-1]))
+    # b_box = list(b_boxes)
+    # b = b_box[-1] - alpha_bb * b_box[-2] - alpha_bb**2 * b_box[-3] - alpha_bb**3 * b_box[-4]
 
-    b_boxes.append(bb_vec)
-    b_box = list(b_boxes)
-    b = b_box[-1] - alpha_bb * b_box[-2] - alpha_bb**2 * b_box[-3] - alpha_bb**3 * b_box[-4]
-
+    # b = bb_vec * (alpha_bb + 1) - torch.abs(alpha_bb * b_boxes[-1])
+    # print('b: ', b.shape)
     rec_act = torch.stack(list(recent_actions), dim=-1)[:, -1].unsqueeze(-1)
-    # rec_b_b = torch.stack(b, dim=-1)[:, :, -1]
-    rec_b_b = torch.from_numpy(np.array(b))
+    rec_b_b = torch.stack(list(b_boxes), dim=-1)[:, :, -1]
     rec_states = torch.stack(list(recent_states), dim=-1)[:, :, -1]
     rec_states = torch.cat([rec_states, rec_act], dim=-1)
 
 
-    actions_new, new_probs, log_prob, entropy, hidden_state_w, loss = generate_action_number(rec_states, state_dict, rec_b_b)
-    # actions_new = recent_actions[-1]
-    # log_prob = recent_log_probs[-1]
-    # entropy = entropys[-1]
-    # new_probs = recent_probs[-1]
+    actions_new, new_probs, log_prob, entropy, hidden_state_w, loss, actions_targ = generate_action_number(rec_states, state_dict, rec_b_b)
+
     print(actions_new.tolist(), '\n')
-    # print('actions_targ: ', actions_targ)
-    # print('vel_reward: ', vel_reward[5])
-    # print('angular_velocity_reward: ', angular_velocity_reward[5])
+    print('actions_targ: ', actions_targ)
     time = (state[14]*2.5).int()
     print('time: ', time)
     print('bb_vec: ', torch.sum(bb_vec, dim=-1).long())
+    print('bb_vec: ', torch.sum(b_boxes[-1], dim=-1).long())
+
     print('state_only: ', state_only[5])
     print('loss: ', loss)
     df = pd.DataFrame(state_dict)
@@ -307,7 +310,7 @@ def send_data(new_states, keys, recent_actions, b_boxes, recent_rewards, recent_
     pd.set_option('display.max_columns', None)
     pd.set_option('display.width', None)
     pd.set_option('display.max_colwidth', None)
-    print('DisTerr and Bounding_box\n', df[['DisTerr', 'Bounding_box_X', 'Bounding_box_Y', 'Bounding_box_W', 'Bounding_box_H']])
+    print('DisTerr and Bounding_box\n', df[['DisTerr', 'Bounding_box_X', 'Bounding_box_Y', 'Bounding_box_W', 'Bounding_box_H', 'angularVelocityZ']])
     # print('DisTerr and Bounding_box\n', df[['Acceleration_x', 'Acceleration_y', 'Acceleration_z', 'AngularAcceleratio_x', 'AngularAcceleratio_y', 'AngularAcceleratio_z']])
     print('rewards: ',  new_rewards/3)
     return recent_states, b_boxes, recent_rewards, actions_new, do,  new_probs, log_prob, entropy, recent_hid, time, loss
@@ -344,11 +347,11 @@ def train(keys, b_boxes, recent_rewards, recent_hid):
 
     actor_loss_mean = []
     critic_loss_mean = []
-    actor.optimizer.zero_grad()  # Обнуляем градиенты актора перед аккумулированием
-    critic.optimizer.zero_grad()  # Обнуляем градиенты критика перед аккумулированием
+    # actor.optimizer.zero_grad()  # Обнуляем градиенты актора перед аккумулированием
+    # critic.optimizer.zero_grad()  # Обнуляем градиенты критика перед аккумулированием
     alpha_bb = 0.25
     b_box = list(b_boxes)
-    for i in range(13, 14):
+    for i in range(14, 15):
         rewards = recent_rewards[i]
         # rewards_next = list(recent_rewards)[i+1:i+3]
         # print(discount_rewards(torch.tensor(np.array(rewards_next), dtype=torch.float32)))
@@ -360,20 +363,20 @@ def train(keys, b_boxes, recent_rewards, recent_hid):
         log_prob = recent_log_probs[i-1]
         entropy = entropys[i-1]
         # probs = recent_probs[i-1]
-        actions =recent_actions[i-1].unsqueeze(-1)
+        # actions =recent_actions[i-1].unsqueeze(-1)
 
         act = rec_act[:, i-1].unsqueeze(-1)
-        b = b_box[i] - alpha_bb * b_box[i-1] - alpha_bb**2 * b_box[i-2] - alpha_bb**3 * b_box[i-3]
-        boxes = torch.from_numpy(np.array(b))
-        # boxes = rec_b_boxes[:, :, i]
+        # b = b_box[i] - alpha_bb * b_box[i-1] - alpha_bb**2 * b_box[i-2] - alpha_bb**3 * b_box[i-3]
+        # boxes = torch.from_numpy(np.array(b))
+        boxes = rec_b_boxes[:, :, i]
         states = rec_state[:, :, i]
         states = torch.cat([states, act], dim=-1)
 
 
         new_act = rec_act[:, i].unsqueeze(-1)
-        b = b_box[i+1] - alpha_bb * b_box[i] - alpha_bb**2 * b_box[i-1] - alpha_bb**3 * b_box[i-2]
-        boxes_new = torch.from_numpy(np.array(b))
-        # boxes_new = rec_b_boxes[:, :, i+1]
+        # b = b_box[i+1] - alpha_bb * b_box[i-2] - alpha_bb**2 * b_box[i-1] - alpha_bb**3 * b_box[i-2]
+        # boxes_new = torch.from_numpy(np.array(b))
+        boxes_new = rec_b_boxes[:, :, i+1]
         states_new = rec_state[:, :, i+1]
         states_new = torch.cat([states_new, new_act], dim=-1)
 
@@ -382,35 +385,27 @@ def train(keys, b_boxes, recent_rewards, recent_hid):
         with torch.no_grad():
             next_values = critic(states_new, boxes_new)
             next_values = next_values.squeeze()
-        advantages = (rewards + (1 - done_i) * (gamma * rewards_next + gamma**2*rewards_next_ + gamma**3*rewards_next__) - values).detach()
-        actor_loss = (-log_prob * advantages) - 0.001 * entropy
+        advantages = (rewards + (1 - done_i) * gamma * next_values - values).detach()
+        actor_loss = (-log_prob * advantages)
 
-        critic_loss = F.mse_loss(values, rewards + (1 - done_i) * (gamma * rewards_next + gamma**2*rewards_next_ + gamma**3*rewards_next__).detach(), reduction='none')
-
+        # critic_loss = F.mse_loss(values, rewards + (1 - done_i) * (gamma * rewards_next + gamma**2*rewards_next_ + gamma**3*rewards_next__).detach(), reduction='mean')
+        critic_loss = F.mse_loss(values, rewards + (1 - done_i) * (gamma * next_values).detach(), reduction='mean')
+        actor.optimizer.zero_grad()
+        critic.optimizer.zero_grad()
+        torch.nn.utils.clip_grad_norm_(actor.parameters(), max_norm=1)
+        torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=1)
+        actor_loss.mean().backward(retain_graph=True)
+        critic_loss.backward(retain_graph=True)
         actor_loss_mean.append(actor_loss)
         critic_loss_mean.append(critic_loss)
+        actor.optimizer.step()
+        critic.optimizer.step()
+
     actor_loss_mean = torch.stack(actor_loss_mean, dim=-1).mean(dim=-1)
     critic_loss_mean = torch.stack(critic_loss_mean, dim=-1).mean(dim=-1)
     print('actor_loss: ', actor_loss_mean.sum())
     print('critic_loss: ', critic_loss_mean.sum())
-    # total_params_actor = sum(p.numel() for p in actor.parameters() if p.requires_grad)
-    # total_params_critic = sum(p.numel() for p in critic.parameters() if p.requires_grad)
-    #
-    # print("Total trainable parameters in Actor:", total_params_actor)
-    # print("Total trainable parameters in Critic:", total_params_critic)
 
-    actor.optimizer.zero_grad()
-    critic.optimizer.zero_grad()
-    for i in range(12):
-        torch.nn.utils.clip_grad_norm_(actor.parameters(), max_norm=1)
-        torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=1)
-        actor_loss_mean[i].backward(retain_graph=True)  # Обратное распространение для каждого дрона
-        critic_loss_mean[i].backward(retain_graph=True)  # Обратное распространение для каждого дрона
-        if torch.isnan(loss) or torch.isinf(loss):
-            print("Skipping backpropagation due to non-finite loss")
-            continue
-    actor.optimizer.step()
-    critic.optimizer.step()
     new_probs = torch.round(new_probs*1000)/1000
     print('advantages: ', advantages)
     print('\n', next_values, '\n', next_actions[5].tolist(), new_probs[5])
