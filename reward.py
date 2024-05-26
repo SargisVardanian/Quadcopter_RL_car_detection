@@ -17,7 +17,7 @@ def reward_function(state_dict, bb_vec):
     v_z = np.array(state_dict['RotZ'])
     object_lost = (bbox_w == -1) | (bbox_h == -1)
 
-    target_altitude = 15 # Целевая высота полёта
+    target_altitude = 25 # Целевая высота полёта
 
     # Размеры изображения (предположим)
     img_width, img_height = 256, 256
@@ -30,18 +30,15 @@ def reward_function(state_dict, bb_vec):
     # Расчет смещения центра от центра кадра
     center_reward = np.exp(-((center_x - center_target_x)**2 + (center_y - center_target_y)**2) * 0.0002) - 0.2
     center_reward = np.round(center_reward, 4)
-    # Вознаграждение за центрирование объекта
-    # center_reward = np.exp(-center_offset / 100)  # Уменьшенная чувствительность смещения
 
     # Вознаграждение за размер объекта
-    size_reward = np.round(np.where((bbox_w > -1) & (bbox_h > -1), np.exp(-np.abs(bbox_w * bbox_h - 1220) / 3660), -2), 4)  # Удвоенный вес
-    # так же возможен такой вариант z\ =\ \exp\left(-\left(\frac{yx}{1000}-1\right)^{4}\cdot4\right)
+    size_reward = np.round(np.where((bbox_w > -1) & (bbox_h > -1), np.exp(-np.abs(bbox_w * bbox_h - 2505) / 3050), -1), 4)  # Удвоенный вес
 
-    v_r = np.exp(-((-np.abs(v_z)-7)**2)*0.1) + np.exp(-((-np.abs(v_z)-7)**2)*0.1)
+    v_r = np.exp(-((-np.abs(v_x)-7)**2)*0.02) + np.exp(-((-np.abs(v_z)-7)**2)*0.02)
     vel_reward = np.round(np.where((bbox_w > -1) & (bbox_h > -1),
-                                   np.where((size_reward > 70*70), 0, v_r), -v_r), 4)
+                                   np.where((bbox_w * bbox_h > 70*70), 0, v_r), -v_r), 4)
 
-    altitude_reward = np.exp(-(altitude - target_altitude)**4 / 25000)-0.6
+    # altitude_reward = np.exp(-(altitude - target_altitude)**4 / 25000)-0.6
 
     # Вознаграждение за угловую скорость при потере объекта
     angular_velocity_reward = np.where(object_lost, np.exp(-np.abs(np.abs(angular_velocity_z) -0.5) * 6), 0)
@@ -50,19 +47,19 @@ def reward_function(state_dict, bb_vec):
     loss_penalty = np.where((bbox_w == -1) | (bbox_h == -1), -2, 0)
 
     # Штраф за слишком низкий полёт
-    low_altitude_penalty = np.where(altitude < 1,
-                                    -0.2,
+    low_altitude_penalty = np.where(altitude < 3,
+                                    -0.7,
                                     np.where(
-                                        altitude > 40,
-                                        -0.5,
-                                        0.2
+                                        altitude > 50,
+                                        -0.7,
+                                        0.0
                                     ))  # Сильный штраф за полёт ниже 1 метра
 
     # Комбинирование вознаграждений
-    total_reward = (center_reward * 2 + size_reward * 2 + altitude_reward * 2 + loss_penalty +
-                    angular_velocity_reward*4 + low_altitude_penalty + vel_reward)
+    total_reward = (center_reward*2 + size_reward * 8 + loss_penalty +
+                    angular_velocity_reward*2 + low_altitude_penalty + vel_reward)
 
-    return total_reward.tolist()
+    return total_reward.tolist(), vel_reward
 
 
 
